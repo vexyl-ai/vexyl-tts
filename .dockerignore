@@ -1,0 +1,12 @@
+venv/
+.git/
+.claude/
+.env
+*.md
+test.html
+test-batch.html
+*.sh
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

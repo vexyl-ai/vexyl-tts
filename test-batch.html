@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VEXYL-TTS Batch Test</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .container { width: 560px; padding: 32px; background: #16213e; border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #888; margin-bottom: 24px; }
+  .section { margin-bottom: 24px; }
+  .section-title { font-size: 14px; font-weight: 600; color: #e94560; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  label { display: block; font-size: 13px; color: #aaa; margin-bottom: 4px; }
+  input[type="text"], select, textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #333; background: #0f3460; color: #eee; font-size: 14px; margin-bottom: 12px; font-family: inherit; }
+  textarea { min-height: 80px; resize: vertical; }
+  input[type="text"]:focus, select:focus, textarea:focus { outline: none; border-color: #e94560; }
+  .row { display: flex; gap: 12px; align-items: flex-end; }
+  .row > * { flex: 1; }
+  button { padding: 10px 20px; border-radius: 8px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; width: 100%; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: #e94560; color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: #ff1744; }
+  .btn-secondary { background: #0f3460; color: #eee; border: 1px solid #444; }
+  .btn-secondary:hover:not(:disabled) { background: #1a4a8a; }
+  .btn-small { padding: 8px 14px; font-size: 13px; width: auto; }
+  .jobs-list { display: flex; flex-direction: column; gap: 8px; }
+  .job-card { background: #0f3460; border-radius: 8px; padding: 14px; border-left: 4px solid #555; }
+  .job-card.queued { border-left-color: #ffc107; }
+  .job-card.processing { border-left-color: #2196f3; }
+  .job-card.completed { border-left-color: #00c853; }
+  .job-card.failed { border-left-color: #ff1744; }
+  .job-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .job-id { font-size: 13px; font-family: monospace; color: #ccc; }
+  .job-status { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 4px; }
+  .job-status.queued { background: rgba(255,193,7,0.2); color: #ffc107; }
+  .job-status.processing { background: rgba(33,150,243,0.2); color: #2196f3; }
+  .job-status.completed { background: rgba(0,200,83,0.2); color: #00c853; }
+  .job-status.failed { background: rgba(255,23,68,0.2); color: #ff1744; }
+  .job-meta { font-size: 12px; color: #666; margin-bottom: 4px; }
+  .job-text { font-size: 13px; color: #aaa; background: #1a1a2e; padding: 8px 10px; border-radius: 6px; margin-top: 6px; max-height: 60px; overflow-y: auto; }
+  .job-audio { margin-top: 8px; }
+  .job-audio audio { width: 100%; height: 36px; }
+  .job-error { font-size: 13px; color: #ff1744; margin-top: 6px; }
+  .job-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .health-box { background: #0f3460; border-radius: 8px; padding: 14px; font-family: monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; color: #aaa; }
+  .empty-state { text-align: center; padding: 24px; color: #555; font-style: italic; font-size: 14px; }
+  .log { margin-top: 16px; font-size: 11px; color: #555; max-height: 80px; overflow-y: auto; }
+  .log div { padding: 1px 0; }
+  .log .error { color: #ff1744; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>VEXYL-TTS Batch</h1>
+  <p class="subtitle">REST API test client — submit text for async speech synthesis</p>
+
+  <!-- Server Config -->
+  <div class="section">
+    <div class="row" style="align-items: flex-end;">
+      <div style="flex: 2;">
+        <label>Server URL</label>
+        <input type="text" id="serverUrl" value="http://127.0.0.1:8092" placeholder="http://localhost:8080">
+      </div>
+      <div style="flex: 1;">
+        <label>API Key (optional)</label>
+        <input type="text" id="apiKey" value="" placeholder="your-secret">
+      </div>
+    </div>
+    <button class="btn-secondary" onclick="fetchHealth()">Check Health</button>
+    <div id="healthBox" class="health-box" style="display:none; margin-top: 10px;"></div>
+  </div>
+
+  <!-- Submit Job -->
+  <div class="section">
+    <div class="section-title">Submit Batch Job</div>
+
+    <label>Text to synthesize</label>
+    <textarea id="textInput" placeholder="Enter text to synthesize..."></textarea>
+
+    <div class="row">
+      <div>
+        <label>Language</label>
+        <select id="langSelect">
+          <option value="ml-IN">Malayalam (ml-IN)</option>
+          <option value="hi-IN">Hindi (hi-IN)</option>
+          <option value="ta-IN">Tamil (ta-IN)</option>
+          <option value="te-IN">Telugu (te-IN)</option>
+          <option value="kn-IN">Kannada (kn-IN)</option>
+          <option value="bn-IN">Bengali (bn-IN)</option>
+          <option value="gu-IN">Gujarati (gu-IN)</option>
+          <option value="mr-IN">Marathi (mr-IN)</option>
+          <option value="pa-IN">Punjabi (pa-IN)</option>
+          <option value="or-IN">Odia (or-IN)</option>
+          <option value="as-IN">Assamese (as-IN)</option>
+          <option value="ur-IN">Urdu (ur-IN)</option>
+          <option value="ne-IN">Nepali (ne-IN)</option>
+          <option value="sa-IN">Sanskrit (sa-IN)</option>
+          <option value="brx-IN">Bodo (brx-IN)</option>
+          <option value="doi-IN">Dogri (doi-IN)</option>
+          <option value="kok-IN">Konkani (kok-IN)</option>
+          <option value="mai-IN">Maithili (mai-IN)</option>
+          <option value="mni-IN">Manipuri (mni-IN)</option>
+          <option value="sat-IN">Santali (sat-IN)</option>
+          <option value="sd-IN">Sindhi (sd-IN)</option>
+          <option value="en-IN">English - Indian (en-IN)</option>
+        </select>
+      </div>
+      <div>
+        <label>Style</label>
+        <select id="styleSelect">
+          <option value="default">Default</option>
+          <option value="warm">Warm</option>
+          <option value="formal">Formal</option>
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-top: -4px;">
+      <div>
+        <label>Speaker</label>
+        <select id="speakerSelect">
+          <option value="">Auto (from style)</option>
+        </select>
+      </div>
+      <div>
+        <button class="btn-primary" id="submitBtn" onclick="submitJob()">Submit Job</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Jobs -->
+  <div class="section">
+    <div class="section-title">Jobs</div>
+    <div id="jobsList">
+      <div class="empty-state">No jobs submitted yet</div>
+    </div>
+  </div>
+
+  <div class="log" id="logBox"></div>
+</div>
+
+<script>
+const SPEAKERS = {
+  'ml-IN':  [{ name: 'Anjali', gender: 'F' }, { name: 'Harish', gender: 'M' }],
+  'hi-IN':  [{ name: 'Divya', gender: 'F' }, { name: 'Rohit', gender: 'M' }],
+  'ta-IN':  [{ name: 'Kavitha', gender: 'F' }, { name: 'Jaya', gender: 'F' }],
+  'te-IN':  [{ name: 'Lalitha', gender: 'F' }, { name: 'Prakash', gender: 'M' }],
+  'kn-IN':  [{ name: 'Anu', gender: 'F' }, { name: 'Suresh', gender: 'M' }],
+  'bn-IN':  [{ name: 'Aditi', gender: 'F' }, { name: 'Arjun', gender: 'M' }],
+  'gu-IN':  [{ name: 'Neha', gender: 'F' }, { name: 'Yash', gender: 'M' }],
+  'mr-IN':  [{ name: 'Sunita', gender: 'F' }, { name: 'Sanjay', gender: 'M' }],
+  'en-IN':  [{ name: 'Mary', gender: 'F' }, { name: 'Thoma', gender: 'M' }],
+  'pa-IN':  [{ name: 'Divjot', gender: 'F' }, { name: 'Gurpreet', gender: 'M' }],
+  'or-IN':  [{ name: 'Debjani', gender: 'F' }, { name: 'Manas', gender: 'M' }],
+  'as-IN':  [{ name: 'Sita', gender: 'F' }, { name: 'Amit', gender: 'M' }],
+  'ur-IN':  [{ name: 'Zainab', gender: 'F' }, { name: 'Rohit', gender: 'M' }],
+  'ne-IN':  [{ name: 'Amrita', gender: 'F' }, { name: 'Ram', gender: 'M' }],
+  'sa-IN':  [{ name: 'Vasudha', gender: 'F' }, { name: 'Aryan', gender: 'M' }],
+  'brx-IN': [{ name: 'Bimala', gender: 'F' }, { name: 'Bikram', gender: 'M' }],
+  'doi-IN': [{ name: 'Meena', gender: 'F' }, { name: 'Vikram', gender: 'M' }],
+  'kok-IN': [{ name: 'Priya', gender: 'F' }, { name: 'Kaustubh', gender: 'M' }],
+  'mai-IN': [{ name: 'Shruti', gender: 'F' }, { name: 'Saurabh', gender: 'M' }],
+  'mni-IN': [{ name: 'Leima', gender: 'F' }, { name: 'Tomba', gender: 'M' }],
+  'sat-IN': [{ name: 'Sumitra', gender: 'F' }, { name: 'Raju', gender: 'M' }],
+  'sd-IN':  [{ name: 'Hema', gender: 'F' }, { name: 'Mohan', gender: 'M' }],
+};
+
+const STYLE_TONES = {
+  'default': 'calm, clear, and professional tone with a moderate speed',
+  'warm':    'warm and empathetic tone, slightly slow-paced for clarity',
+  'formal':  'formal, neutral tone with precise diction and moderate speed',
+};
+
+function updateSpeakers() {
+  const lang = document.getElementById('langSelect').value;
+  const sel = document.getElementById('speakerSelect');
+  const speakers = SPEAKERS[lang] || [];
+  sel.innerHTML = '<option value="">Auto (from style)</option>';
+  speakers.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s.name;
+    opt.textContent = s.name + ' (' + s.gender + ')';
+    sel.appendChild(opt);
+  });
+}
+
+function buildDescription(speaker, style) {
+  const tone = STYLE_TONES[style] || STYLE_TONES['default'];
+  return speaker + ' speaks in a ' + tone + '. The recording is of very high quality with no background noise.';
+}
+
+document.getElementById('langSelect').addEventListener('change', updateSpeakers);
+updateSpeakers();
+
+const jobs = [];
+let pollTimers = {};
+
+const logBox = document.getElementById('logBox');
+
+function log(msg, isError) {
+  const d = document.createElement('div');
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  if (isError) d.className = 'error';
+  logBox.appendChild(d);
+  logBox.scrollTop = logBox.scrollHeight;
+  console[isError ? 'error' : 'log'](msg);
+}
+
+function getBaseUrl() {
+  return document.getElementById('serverUrl').value.replace(/\/+$/, '');
+}
+
+function getHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  const key = document.getElementById('apiKey').value.trim();
+  if (key) headers['X-API-Key'] = key;
+  return headers;
+}
+
+// ── Health ──
+
+async function fetchHealth() {
+  const box = document.getElementById('healthBox');
+  box.style.display = 'block';
+  box.textContent = 'Loading...';
+  try {
+    const res = await fetch(getBaseUrl() + '/health', { headers: getHeaders() });
+    const data = await res.json();
+    box.textContent = JSON.stringify(data, null, 2);
+    log('Health check: ' + data.status);
+  } catch (err) {
+    box.textContent = 'Error: ' + err.message;
+    log('Health check failed: ' + err.message, true);
+  }
+}
+
+// ── Submit Job ──
+
+async function submitJob() {
+  const text = document.getElementById('textInput').value.trim();
+  if (!text) { log('Please enter text', true); return; }
+
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Submitting...';
+
+  const style = document.getElementById('styleSelect').value;
+  const speaker = document.getElementById('speakerSelect').value;
+  const payload = {
+    text: text,
+    lang: document.getElementById('langSelect').value,
+    style: style,
+  };
+  if (speaker) {
+    payload.description = buildDescription(speaker, style);
+  }
+
+  try {
+    const res = await fetch(getBaseUrl() + '/batch/synthesize', {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      log('Submit failed (' + res.status + '): ' + (data.error || JSON.stringify(data)), true);
+      btn.textContent = 'Submit Job';
+      btn.disabled = false;
+      return;
+    }
+
+    log('Job submitted: ' + data.job_id + ' (' + data.text_length + ' chars)');
+    const job = {
+      job_id: data.job_id,
+      status: data.status,
+      language: data.language,
+      style: data.style,
+      text: text,
+      audio_b64: null,
+      sample_rate: null,
+      latency_ms: null,
+      error_message: null,
+    };
+    jobs.unshift(job);
+    renderJobs();
+    startPolling(job.job_id);
+
+  } catch (err) {
+    log('Submit error: ' + err.message, true);
+  }
+
+  btn.textContent = 'Submit Job';
+  btn.disabled = false;
+}
+
+// ── Polling ──
+
+function startPolling(jobId) {
+  if (pollTimers[jobId]) return;
+  pollTimers[jobId] = setInterval(() => pollJob(jobId), 2000);
+}
+
+function stopPolling(jobId) {
+  if (pollTimers[jobId]) {
+    clearInterval(pollTimers[jobId]);
+    delete pollTimers[jobId];
+  }
+}
+
+async function pollJob(jobId) {
+  try {
+    const res = await fetch(getBaseUrl() + '/batch/status/' + jobId, { headers: getHeaders() });
+    const data = await res.json();
+    const job = jobs.find(j => j.job_id === jobId);
+    if (!job) { stopPolling(jobId); return; }
+
+    job.status = data.status;
+    if (data.status === 'completed') {
+      job.audio_b64 = data.audio_b64;
+      job.sample_rate = data.sample_rate;
+      job.latency_ms = data.latency_ms;
+      stopPolling(jobId);
+      log('Job ' + jobId + ' completed (' + data.latency_ms + 'ms)');
+    } else if (data.status === 'failed') {
+      job.error_message = data.error_message;
+      stopPolling(jobId);
+      log('Job ' + jobId + ' failed: ' + data.error_message, true);
+    }
+    renderJobs();
+  } catch (err) {
+    log('Poll error for ' + jobId + ': ' + err.message, true);
+  }
+}
+
+async function refreshJob(jobId) {
+  try {
+    const res = await fetch(getBaseUrl() + '/batch/status/' + jobId, { headers: getHeaders() });
+    const data = await res.json();
+    const job = jobs.find(j => j.job_id === jobId);
+    if (!job) return;
+    job.status = data.status;
+    if (data.audio_b64) job.audio_b64 = data.audio_b64;
+    if (data.sample_rate) job.sample_rate = data.sample_rate;
+    if (data.latency_ms) job.latency_ms = data.latency_ms;
+    if (data.error_message) job.error_message = data.error_message;
+    renderJobs();
+    log('Refreshed job ' + jobId + ': ' + data.status);
+  } catch (err) {
+    log('Refresh error: ' + err.message, true);
+  }
+}
+
+// ── Render ──
+
+function renderJobs() {
+  const container = document.getElementById('jobsList');
+  if (jobs.length === 0) {
+    container.innerHTML = '<div class="empty-state">No jobs submitted yet</div>';
+    return;
+  }
+
+  container.innerHTML = '';
+  for (const job of jobs) {
+    const card = document.createElement('div');
+    card.className = 'job-card ' + job.status;
+
+    let html = `
+      <div class="job-header">
+        <span class="job-id">${job.job_id}</span>
+        <span class="job-status ${job.status}">${job.status === 'processing' ? '<span class="spinner"></span>' : ''}${job.status}</span>
+      </div>
+      <div class="job-meta">${escapeHtml(job.language)} &middot; ${escapeHtml(job.style)} &middot; ${job.text.length} chars</div>
+      <div class="job-text">${escapeHtml(job.text.substring(0, 200))}${job.text.length > 200 ? '...' : ''}</div>
+    `;
+
+    if (job.status === 'completed' && job.audio_b64) {
+      const audioBytes = Uint8Array.from(atob(job.audio_b64), c => c.charCodeAt(0));
+      const blob = new Blob([audioBytes], { type: 'audio/wav' });
+      const audioUrl = URL.createObjectURL(blob);
+      html += `<div class="job-audio"><audio controls src="${audioUrl}"></audio></div>`;
+      html += `<div class="job-meta" style="margin-top:6px;">Inference: ${job.latency_ms}ms &middot; ${job.sample_rate}Hz</div>`;
+    }
+
+    if (job.status === 'failed' && job.error_message) {
+      html += `<div class="job-error">${escapeHtml(job.error_message)}</div>`;
+    }
+
+    if (job.status === 'queued' || job.status === 'processing') {
+      html += `<div class="job-actions"><button class="btn-secondary btn-small" onclick="refreshJob('${job.job_id}')">Refresh</button></div>`;
+    }
+
+    card.innerHTML = html;
+    container.appendChild(card);
+  }
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+</script>
+</body>
+</html>

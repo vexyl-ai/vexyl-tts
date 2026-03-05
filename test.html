@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VEXYL-TTS Test</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .container { width: 520px; padding: 32px; background: #16213e; border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .subtitle { font-size: 13px; color: #888; margin-bottom: 24px; }
+  .status { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; font-size: 14px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; flex-shrink: 0; }
+  .dot.connected { background: #00c853; }
+  .dot.synthesizing { background: #ffc107; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+  select, textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #333; background: #0f3460; color: #eee; font-size: 14px; font-family: inherit; }
+  select { flex: 1; }
+  textarea { min-height: 80px; resize: vertical; margin-bottom: 16px; }
+  textarea:focus, select:focus { outline: none; border-color: #e94560; }
+  button { padding: 10px 20px; border-radius: 8px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #connectBtn { background: #0f3460; color: #eee; border: 1px solid #444; }
+  #connectBtn:hover:not(:disabled) { background: #1a4a8a; }
+  #synthesizeBtn { background: #e94560; color: #fff; width: 100%; margin-bottom: 20px; }
+  #synthesizeBtn:hover:not(:disabled) { background: #ff1744; }
+  .results-box { background: #0f3460; border-radius: 8px; padding: 16px; min-height: 120px; max-height: 360px; overflow-y: auto; font-size: 14px; line-height: 1.6; }
+  .results-box .placeholder { color: #555; font-style: italic; }
+  .entry { margin-bottom: 12px; padding: 10px 12px; background: #1a1a2e; border-radius: 6px; }
+  .entry .lang { font-size: 11px; color: #e94560; text-transform: uppercase; margin-bottom: 2px; }
+  .entry .text { color: #ccc; font-size: 13px; margin-bottom: 6px; }
+  .entry .meta { font-size: 11px; color: #666; margin-bottom: 6px; }
+  .entry audio { width: 100%; height: 36px; }
+  .log { margin-top: 16px; font-size: 11px; color: #555; max-height: 80px; overflow-y: auto; }
+  .log div { padding: 1px 0; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>VEXYL-TTS</h1>
+  <p class="subtitle">WebSocket text-to-speech test client</p>
+
+  <div class="status">
+    <div class="dot" id="statusDot"></div>
+    <span id="statusText">Disconnected</span>
+  </div>
+
+  <div class="controls">
+    <select id="langSelect">
+      <option value="ml-IN">Malayalam (ml-IN)</option>
+      <option value="hi-IN">Hindi (hi-IN)</option>
+      <option value="ta-IN">Tamil (ta-IN)</option>
+      <option value="te-IN">Telugu (te-IN)</option>
+      <option value="kn-IN">Kannada (kn-IN)</option>
+      <option value="bn-IN">Bengali (bn-IN)</option>
+      <option value="gu-IN">Gujarati (gu-IN)</option>
+      <option value="mr-IN">Marathi (mr-IN)</option>
+      <option value="pa-IN">Punjabi (pa-IN)</option>
+      <option value="or-IN">Odia (or-IN)</option>
+      <option value="as-IN">Assamese (as-IN)</option>
+      <option value="ur-IN">Urdu (ur-IN)</option>
+      <option value="ne-IN">Nepali (ne-IN)</option>
+      <option value="sa-IN">Sanskrit (sa-IN)</option>
+      <option value="brx-IN">Bodo (brx-IN)</option>
+      <option value="doi-IN">Dogri (doi-IN)</option>
+      <option value="kok-IN">Konkani (kok-IN)</option>
+      <option value="mai-IN">Maithili (mai-IN)</option>
+      <option value="mni-IN">Manipuri (mni-IN)</option>
+      <option value="sat-IN">Santali (sat-IN)</option>
+      <option value="sd-IN">Sindhi (sd-IN)</option>
+      <option value="en-IN">English - Indian (en-IN)</option>
+    </select>
+    <select id="styleSelect">
+      <option value="default">Default</option>
+      <option value="warm">Warm</option>
+      <option value="formal">Formal</option>
+    </select>
+    <select id="speakerSelect">
+      <option value="">Auto (from style)</option>
+    </select>
+    <button id="connectBtn" onclick="toggleConnection()">Connect</button>
+  </div>
+
+  <textarea id="textInput" placeholder="Enter text to synthesize..."></textarea>
+
+  <button id="synthesizeBtn" disabled onclick="synthesize()">Synthesize</button>
+
+  <div class="results-box" id="resultsBox">
+    <div class="placeholder">Audio results will appear here...</div>
+  </div>
+
+  <div class="log" id="logBox"></div>
+</div>
+
+<script>
+const WS_URL = 'ws://127.0.0.1:8092';
+
+const SPEAKERS = {
+  'ml-IN':  [{ name: 'Anjali', gender: 'F' }, { name: 'Harish', gender: 'M' }],
+  'hi-IN':  [{ name: 'Divya', gender: 'F' }, { name: 'Rohit', gender: 'M' }],
+  'ta-IN':  [{ name: 'Kavitha', gender: 'F' }, { name: 'Jaya', gender: 'F' }],
+  'te-IN':  [{ name: 'Lalitha', gender: 'F' }, { name: 'Prakash', gender: 'M' }],
+  'kn-IN':  [{ name: 'Anu', gender: 'F' }, { name: 'Suresh', gender: 'M' }],
+  'bn-IN':  [{ name: 'Aditi', gender: 'F' }, { name: 'Arjun', gender: 'M' }],
+  'gu-IN':  [{ name: 'Neha', gender: 'F' }, { name: 'Yash', gender: 'M' }],
+  'mr-IN':  [{ name: 'Sunita', gender: 'F' }, { name: 'Sanjay', gender: 'M' }],
+  'en-IN':  [{ name: 'Mary', gender: 'F' }, { name: 'Thoma', gender: 'M' }],
+  'pa-IN':  [{ name: 'Divjot', gender: 'F' }, { name: 'Gurpreet', gender: 'M' }],
+  'or-IN':  [{ name: 'Debjani', gender: 'F' }, { name: 'Manas', gender: 'M' }],
+  'as-IN':  [{ name: 'Sita', gender: 'F' }, { name: 'Amit', gender: 'M' }],
+  'ur-IN':  [{ name: 'Zainab', gender: 'F' }, { name: 'Rohit', gender: 'M' }],
+  'ne-IN':  [{ name: 'Amrita', gender: 'F' }, { name: 'Ram', gender: 'M' }],
+  'sa-IN':  [{ name: 'Vasudha', gender: 'F' }, { name: 'Aryan', gender: 'M' }],
+  'brx-IN': [{ name: 'Bimala', gender: 'F' }, { name: 'Bikram', gender: 'M' }],
+  'doi-IN': [{ name: 'Meena', gender: 'F' }, { name: 'Vikram', gender: 'M' }],
+  'kok-IN': [{ name: 'Priya', gender: 'F' }, { name: 'Kaustubh', gender: 'M' }],
+  'mai-IN': [{ name: 'Shruti', gender: 'F' }, { name: 'Saurabh', gender: 'M' }],
+  'mni-IN': [{ name: 'Leima', gender: 'F' }, { name: 'Tomba', gender: 'M' }],
+  'sat-IN': [{ name: 'Sumitra', gender: 'F' }, { name: 'Raju', gender: 'M' }],
+  'sd-IN':  [{ name: 'Hema', gender: 'F' }, { name: 'Mohan', gender: 'M' }],
+};
+
+const STYLE_TONES = {
+  'default': 'calm, clear, and professional tone with a moderate speed',
+  'warm':    'warm and empathetic tone, slightly slow-paced for clarity',
+  'formal':  'formal, neutral tone with precise diction and moderate speed',
+};
+
+let ws = null;
+let requestId = 0;
+
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const connectBtn = document.getElementById('connectBtn');
+const synthesizeBtn = document.getElementById('synthesizeBtn');
+const langSelect = document.getElementById('langSelect');
+const styleSelect = document.getElementById('styleSelect');
+const speakerSelect = document.getElementById('speakerSelect');
+const textInput = document.getElementById('textInput');
+const resultsBox = document.getElementById('resultsBox');
+const logBox = document.getElementById('logBox');
+
+function updateSpeakers() {
+  const lang = langSelect.value;
+  const speakers = SPEAKERS[lang] || [];
+  speakerSelect.innerHTML = '<option value="">Auto (from style)</option>';
+  speakers.forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s.name;
+    opt.textContent = s.name + ' (' + s.gender + ')';
+    speakerSelect.appendChild(opt);
+  });
+}
+
+function buildDescription(speaker, style) {
+  const tone = STYLE_TONES[style] || STYLE_TONES['default'];
+  return speaker + ' speaks in a ' + tone + '. The recording is of very high quality with no background noise.';
+}
+
+langSelect.addEventListener('change', updateSpeakers);
+updateSpeakers();
+
+function log(msg) {
+  const d = document.createElement('div');
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logBox.appendChild(d);
+  logBox.scrollTop = logBox.scrollHeight;
+  console.log(msg);
+}
+
+function setStatus(text, state) {
+  statusText.textContent = text;
+  statusDot.className = 'dot' + (state ? ' ' + state : '');
+}
+
+function toggleConnection() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close();
+    return;
+  }
+  connect();
+}
+
+function connect() {
+  setStatus('Connecting...', '');
+  connectBtn.disabled = true;
+  log('Connecting to ' + WS_URL);
+
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    log('WebSocket connected');
+  };
+
+  ws.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch (err) { log('Parse error: ' + err.message); return; }
+
+    if (msg.type === 'ready') {
+      setStatus('Connected — ' + msg.model + ' (' + msg.sample_rate + 'Hz)', 'connected');
+      connectBtn.textContent = 'Disconnect';
+      connectBtn.disabled = false;
+      synthesizeBtn.disabled = false;
+      log('Server ready: ' + msg.languages.length + ' languages');
+    } else if (msg.type === 'audio') {
+      setStatus('Connected', 'connected');
+      synthesizeBtn.disabled = false;
+      synthesizeBtn.textContent = 'Synthesize';
+      addAudioResult(msg);
+    } else if (msg.type === 'error') {
+      setStatus('Connected', 'connected');
+      synthesizeBtn.disabled = false;
+      synthesizeBtn.textContent = 'Synthesize';
+      log('Error: ' + msg.message);
+    } else if (msg.type === 'stats') {
+      log('Stats: cache=' + msg.cache_size + ' hits=' + msg.cache_hits + '/' + msg.cache_total + ' (' + msg.hit_rate + '%)');
+    }
+  };
+
+  ws.onerror = () => {
+    log('WebSocket error');
+    setStatus('Error', '');
+  };
+
+  ws.onclose = () => {
+    log('WebSocket disconnected');
+    setStatus('Disconnected', '');
+    connectBtn.textContent = 'Connect';
+    connectBtn.disabled = false;
+    synthesizeBtn.disabled = true;
+    ws = null;
+  };
+}
+
+function synthesize() {
+  const text = textInput.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  requestId++;
+  const reqId = 'req_' + requestId;
+  const lang = langSelect.value;
+  const style = styleSelect.value;
+  const speaker = speakerSelect.value;
+
+  const msg = {
+    type: 'synthesize',
+    text: text,
+    lang: lang,
+    style: style,
+    request_id: reqId
+  };
+  if (speaker) {
+    msg.description = buildDescription(speaker, style);
+  }
+  ws.send(JSON.stringify(msg));
+
+  setStatus('Synthesizing...', 'synthesizing');
+  synthesizeBtn.disabled = true;
+  synthesizeBtn.innerHTML = '<span class="spinner"></span>Synthesizing...';
+  const speakerInfo = speaker ? ' [' + speaker + ']' : '';
+  log('Sent: ' + lang + '/' + style + speakerInfo + ' — "' + text.substring(0, 50) + '"');
+}
+
+function addAudioResult(msg) {
+  const placeholder = resultsBox.querySelector('.placeholder');
+  if (placeholder) placeholder.remove();
+
+  // Decode base64 to audio blob
+  const audioBytes = Uint8Array.from(atob(msg.audio_b64), c => c.charCodeAt(0));
+  const blob = new Blob([audioBytes], { type: 'audio/wav' });
+  const audioUrl = URL.createObjectURL(blob);
+
+  const entry = document.createElement('div');
+  entry.className = 'entry';
+
+  const langDiv = document.createElement('div');
+  langDiv.className = 'lang';
+  langDiv.textContent = msg.request_id;
+
+  const metaDiv = document.createElement('div');
+  metaDiv.className = 'meta';
+  metaDiv.textContent = msg.latency_ms + 'ms' + (msg.cached ? ' (cached)' : '') + ' — ' + msg.sample_rate + 'Hz';
+
+  const audioEl = document.createElement('audio');
+  audioEl.controls = true;
+  audioEl.src = audioUrl;
+
+  entry.appendChild(langDiv);
+  entry.appendChild(metaDiv);
+  entry.appendChild(audioEl);
+
+  resultsBox.insertBefore(entry, resultsBox.firstChild);
+  resultsBox.scrollTop = 0;
+
+  // Auto-play
+  audioEl.play().catch(() => {});
+
+  log('Audio received: ' + msg.latency_ms + 'ms' + (msg.cached ? ' (cached)' : ''));
+}
+
+// Allow Ctrl+Enter to synthesize
+textInput.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    if (!synthesizeBtn.disabled) synthesize();
+  }
+});
+</script>
+</body>
+</html>

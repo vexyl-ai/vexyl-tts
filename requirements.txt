@@ -1,0 +1,17 @@
+# Core ML / inference
+parler-tts @ git+https://github.com/huggingface/parler-tts.git
+transformers
+numpy
+safetensors
+
+# Audio encoding (libsndfile wrapper — WAV output)
+soundfile
+
+# WebSocket server
+websockets>=16.0
+
+# HuggingFace model download
+huggingface_hub
+
+# Note: torch is installed separately in the Dockerfile
+# with --index-url https://download.pytorch.org/whl/cpu for CPU-only builds.
