@@ -1,0 +1,41 @@
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+
+# System deps: libgomp1 for PyTorch OpenMP, libsndfile1 for soundfile
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv libgomp1 libsndfile1 git && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install PyTorch with CUDA support (before other deps to cache this large layer)
+RUN pip install --no-cache-dir \
+    torch \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# Install remaining Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Download the model at build time (baked into image, ~4-6GB)
+# indic-parler-tts is NOT gated — no HF token needed
+RUN python3 -c "\
+from parler_tts import ParlerTTSForConditionalGeneration; \
+from transformers import AutoTokenizer; \
+model = ParlerTTSForConditionalGeneration.from_pretrained('ai4bharat/indic-parler-tts'); \
+AutoTokenizer.from_pretrained('ai4bharat/indic-parler-tts'); \
+AutoTokenizer.from_pretrained(model.config.text_encoder._name_or_path)"
+
+# Copy application code
+COPY vexyl_tts_server.py .
+
+# Set defaults — device=auto will detect CUDA at runtime
+ENV PORT=8080 \
+    VEXYL_TTS_HOST=0.0.0.0 \
+    VEXYL_TTS_DEVICE=auto
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT}/health')"
+
+CMD ["python3", "-u", "vexyl_tts_server.py"]

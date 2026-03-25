@@ -24,7 +24,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 step=0
-total_steps=5
+total_steps=6
 
 print_step() {
     step=$((step + 1))
@@ -73,7 +73,64 @@ else
     fi
 fi
 
-# ── Step 2: Create virtual environment ─────────────────────
+# ── Step 2: Detect GPU ───────────────────────────────────
+print_step "Detecting GPU"
+
+TORCH_VARIANT="cpu"
+TORCH_INDEX="https://download.pytorch.org/whl/cpu"
+DEVICE_DEFAULT="cpu"
+
+if command -v nvidia-smi &>/dev/null; then
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+    GPU_VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader 2>/dev/null | head -1)
+
+    if [ -n "$GPU_NAME" ]; then
+        CUDA_VER=$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' | head -1)
+        CUDA_MAJOR=$(echo "$CUDA_VER" | cut -d. -f1)
+        CUDA_MINOR=$(echo "$CUDA_VER" | cut -d. -f2)
+
+        print_ok "GPU: $GPU_NAME ($GPU_VRAM)"
+        print_ok "CUDA: $CUDA_VER"
+
+        # Map CUDA version to PyTorch index URL
+        # Available PyTorch CUDA indexes: cu118, cu121, cu124, cu126, cu128
+        if [ "$CUDA_MAJOR" -ge 13 ] || { [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 8 ]; }; then
+            TORCH_VARIANT="cu128"
+        elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 6 ]; then
+            TORCH_VARIANT="cu126"
+        elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 4 ]; then
+            TORCH_VARIANT="cu124"
+        elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 1 ]; then
+            TORCH_VARIANT="cu121"
+        elif [ "$CUDA_MAJOR" -eq 11 ] && [ "$CUDA_MINOR" -ge 8 ]; then
+            TORCH_VARIANT="cu118"
+        else
+            print_warn "CUDA $CUDA_VER is too old for PyTorch GPU. Falling back to CPU."
+        fi
+
+        if [ "$TORCH_VARIANT" != "cpu" ]; then
+            TORCH_INDEX="https://download.pytorch.org/whl/$TORCH_VARIANT"
+            DEVICE_DEFAULT="auto"
+            print_ok "PyTorch variant: $TORCH_VARIANT"
+
+            # python3-dev needed for torch.compile (Triton CUDA kernel compilation)
+            PY_DEV_PKG="python$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')-dev"
+            if ! dpkg -s "$PY_DEV_PKG" &>/dev/null 2>&1; then
+                echo -e "  ${CYAN}Installing $PY_DEV_PKG (needed for torch.compile)...${NC}"
+                sudo apt install -y "$PY_DEV_PKG" -q 2>/dev/null
+                print_ok "$PY_DEV_PKG"
+            else
+                print_ok "$PY_DEV_PKG already installed"
+            fi
+        fi
+    else
+        print_warn "nvidia-smi found but no GPU detected. Installing CPU-only PyTorch."
+    fi
+else
+    print_warn "No NVIDIA GPU detected. Installing CPU-only PyTorch."
+fi
+
+# ── Step 3: Create virtual environment ─────────────────────
 print_step "Creating Python virtual environment"
 
 if [ -d "$VENV_DIR" ]; then
@@ -91,12 +148,16 @@ print_ok "Activated venv ($(python3 --version))"
 pip install --upgrade pip -q
 print_ok "pip upgraded"
 
-# ── Step 3: Install dependencies ───────────────────────────
+# ── Step 4: Install dependencies ───────────────────────────
 print_step "Installing Python dependencies"
 
-echo -e "  ${CYAN}Installing PyTorch (CPU)...${NC}"
-pip install torch --index-url https://download.pytorch.org/whl/cpu -q
-print_ok "torch (CPU)"
+if [ "$TORCH_VARIANT" = "cpu" ]; then
+    echo -e "  ${CYAN}Installing PyTorch (CPU)...${NC}"
+else
+    echo -e "  ${CYAN}Installing PyTorch (CUDA $TORCH_VARIANT)...${NC}"
+fi
+pip install torch --index-url "$TORCH_INDEX" -q
+print_ok "torch ($TORCH_VARIANT)"
 
 echo -e "  ${CYAN}Installing parler-tts from GitHub...${NC}"
 pip install git+https://github.com/huggingface/parler-tts.git -q
@@ -106,7 +167,15 @@ echo -e "  ${CYAN}Installing transformers, websockets, numpy, soundfile...${NC}"
 pip install transformers websockets numpy soundfile huggingface_hub -q
 print_ok "transformers, websockets, numpy, soundfile, huggingface_hub"
 
-# ── Step 4: Download model ─────────────────────────────────
+if [ "$TORCH_VARIANT" != "cpu" ]; then
+    echo -e "  ${CYAN}Installing flash-attn (Flash Attention 2 — may take several minutes to compile)...${NC}"
+    pip install wheel psutil ninja packaging -q 2>/dev/null
+    pip install flash-attn --no-build-isolation -q 2>/dev/null && \
+        print_ok "flash-attn" || \
+        print_warn "flash-attn build failed (optional — SDPA will be used instead)"
+fi
+
+# ── Step 5: Download model ─────────────────────────────────
 print_step "Downloading Indic Parler-TTS model"
 
 # This model is NOT gated — no HuggingFace login required
@@ -142,16 +211,16 @@ print()
     fi
 fi
 
-# ── Step 5: Create .env and run.sh ─────────────────────────
+# ── Step 6: Create .env and run.sh ─────────────────────────
 print_step "Creating config files"
 
 if [ -f "$ENV_FILE" ]; then
     print_ok ".env already exists (keeping existing)"
 else
-    cat > "$ENV_FILE" <<'EOF'
+    cat > "$ENV_FILE" <<EOF
 VEXYL_TTS_HOST=127.0.0.1
 VEXYL_TTS_PORT=8092
-VEXYL_TTS_DEVICE=cpu
+VEXYL_TTS_DEVICE=$DEVICE_DEFAULT
 VEXYL_TTS_CACHE_SIZE=200
 EOF
     print_ok "Created .env"
@@ -195,6 +264,15 @@ echo "    .env          — Server settings"
 echo "    run.sh        — Start script"
 echo "    test.html     — Browser test client"
 echo ""
+if [ "$TORCH_VARIANT" != "cpu" ]; then
+    echo -e "  ${BOLD}Device:${NC}"
+    echo "    $GPU_NAME ($GPU_VRAM) — CUDA via $TORCH_VARIANT"
+    echo ""
+else
+    echo -e "  ${BOLD}Device:${NC}"
+    echo "    CPU (no NVIDIA GPU detected)"
+    echo ""
+fi
 echo -e "  Model cached at:"
 echo "    ~/.cache/huggingface/hub/models--ai4bharat--indic-parler-tts"
 echo ""

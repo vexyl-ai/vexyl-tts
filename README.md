@@ -79,8 +79,9 @@ open test.html
 - **Python 3.10+**
 - **macOS or Linux**
 - **~6 GB disk space** for model weights and dependencies
+- **NVIDIA GPU (optional)** — automatically detected by `setup.sh`. Installs CUDA-enabled PyTorch and sets `VEXYL_TTS_DEVICE=auto`
 
-The model is **not gated** — no HuggingFace login required. The setup script handles everything: creates a virtual environment, installs dependencies, downloads the model, and generates config files.
+The model is **not gated** — no HuggingFace login required. The setup script handles everything: creates a virtual environment, detects GPU, installs the correct PyTorch (CPU or CUDA), downloads the model, and generates config files.
 
 ---
 
@@ -97,18 +98,16 @@ pip install --upgrade pip
 ### 2. Install dependencies
 
 ```bash
-# PyTorch (CPU-only, smaller download)
-pip install torch --index-url https://download.pytorch.org/whl/cpu
+# PyTorch — choose ONE:
+pip install torch --index-url https://download.pytorch.org/whl/cpu      # CPU-only
+pip install torch --index-url https://download.pytorch.org/whl/cu128    # NVIDIA GPU (CUDA 12.8+)
+pip install torch --index-url https://download.pytorch.org/whl/cu126    # NVIDIA GPU (CUDA 12.6)
+pip install torch --index-url https://download.pytorch.org/whl/cu124    # NVIDIA GPU (CUDA 12.4)
+pip install torch --index-url https://download.pytorch.org/whl/cu121    # NVIDIA GPU (CUDA 12.1)
 
 # Parler-TTS + other dependencies
 pip install git+https://github.com/huggingface/parler-tts.git
 pip install transformers websockets numpy soundfile
-```
-
-For GPU acceleration:
-
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu121
 ```
 
 ### 3. Download the model
@@ -307,7 +306,7 @@ curl http://127.0.0.1:8092/health
 {
   "status": "ok",
   "model": "indic-parler-tts",
-  "device": "cpu",
+  "device": "cuda",
   "cache_size": 42,
   "cache_capacity": 200,
   "cache_hit_rate": 65.3,
@@ -335,18 +334,25 @@ Submit text for async batch synthesis with language, style, and speaker selectio
 
 ## Docker
 
-### Build
+### CPU Build
 
 ```bash
 docker build -t vexyl-tts .
+docker run -p 8080:8080 vexyl-tts
 ```
 
-### Run
+### GPU Build
 
 ```bash
-docker run -p 8080:8080 vexyl-tts
+docker build -f Dockerfile.gpu -t vexyl-tts-gpu .
+docker run --gpus all -p 8080:8080 vexyl-tts-gpu
+```
 
-# With API key
+Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for `--gpus all`.
+
+### With API Key
+
+```bash
 docker run -p 8080:8080 -e VEXYL_TTS_API_KEY=mysecret vexyl-tts
 ```
 
@@ -398,13 +404,40 @@ pm2 save && pm2 startup
 
 ### GPU Acceleration
 
+The `setup.sh` script auto-detects NVIDIA GPUs and installs the correct CUDA-enabled PyTorch. If you set up manually:
+
 ```bash
 source venv/bin/activate
 pip uninstall torch -y
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+pip install torch --index-url https://download.pytorch.org/whl/cu128  # Match your CUDA version
 ```
 
 Set `VEXYL_TTS_DEVICE=auto` (or `cuda`) in `.env` and restart.
+
+#### GPU Performance Optimizations (v1.1.0)
+
+The server includes several GPU-specific optimizations enabled automatically:
+
+- **FP16 inference** — model runs in half-precision, reducing VRAM usage and improving throughput
+- **SDPA (Scaled Dot-Product Attention)** — PyTorch's native optimized attention on the 24-layer decoder
+- **Flash Attention 2** — auto-enabled when `flash-attn` package is installed (optional, further ~10-20% speedup)
+- **Pre-cached voice tokens** — all 69 voice descriptions are tokenized once at startup and kept on GPU
+- **LRU cache on all paths** — both WebSocket and batch API cache synthesized audio; repeated text returns in ~1ms
+
+#### Typical Latency (RTX 5070, FP16, 8kHz output)
+
+| Text Length | Inference Time |
+|------------|---------------|
+| 5 chars | ~980ms |
+| 43 chars | ~1,350ms |
+| 100 chars | ~2,850ms |
+| 254 chars | ~6,600ms |
+| Cached (any) | ~1ms |
+
+The server logs a detailed per-request timing breakdown:
+```
+[perf] tokenize=1.6ms | inference=1347ms | gpu→cpu=8.8ms | resample=0.6ms | wav_encode=0.2ms | total=1364ms | text=43chars
+```
 
 ### macOS Metal (MPS)
 
@@ -446,7 +479,11 @@ lsof -i :8092
 
 ### Out of memory
 
-The Parler-TTS model needs ~4-6 GB RAM. Ensure sufficient memory or use CPU mode (`VEXYL_TTS_DEVICE=cpu`).
+The Parler-TTS model needs ~4-6 GB RAM (CPU) or ~3-4 GB VRAM (GPU with FP16). Ensure sufficient memory or use CPU mode (`VEXYL_TTS_DEVICE=cpu`).
+
+### Flash Attention build fails
+
+`flash-attn` requires the CUDA toolkit version to match PyTorch's CUDA version exactly. If your system CUDA toolkit differs (e.g., CUDA 13.0 with PyTorch cu128), the build will fail. This is optional — the server falls back to SDPA which is nearly as fast.
 
 ---
 
@@ -458,7 +495,9 @@ The Parler-TTS model needs ~4-6 GB RAM. Ensure sufficient memory or use CPU mode
 | `setup.sh` | Automated setup — venv, deps, model download |
 | `run.sh` | Start script — loads `.env`, activates venv, launches server |
 | `deploy.sh` | One-command Cloud Run deployment |
-| `Dockerfile` | Container image with baked-in model |
+| `Dockerfile` | Container image with baked-in model (CPU) |
+| `Dockerfile.gpu` | GPU container image (NVIDIA CUDA 12.8) |
+| `CHANGELOG.md` | Version history and release notes |
 | `.env.example` | Template for server configuration |
 | `test.html` | Browser test client for real-time TTS |
 | `test-batch.html` | Browser test client for batch API |
@@ -475,4 +514,4 @@ Contributions are welcome! Please open an issue or submit a pull request.
 
 ## License
 
-[Apache License 2.0](LICENSE) — Copyright 2025 VEXYL AI
+[Apache License 2.0](LICENSE) — Copyright 2025-2026 VEXYL AI
