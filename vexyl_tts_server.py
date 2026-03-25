@@ -208,6 +208,7 @@ tokenizer      = None
 desc_tokenizer = None
 device         = None
 _infer_lock    = threading.Lock()
+_desc_token_cache = {}   # pre-tokenized voice descriptions, populated in load_model()
 
 # ─── LRU Cache ────────────────────────────────────────────────────────────────
 class LRUCache:
@@ -280,11 +281,33 @@ def load_model():
     start = time.time()
 
     from parler_tts import ParlerTTSForConditionalGeneration
-    from transformers import AutoTokenizer
+    from transformers import AutoTokenizer, AutoConfig
 
-    model = ParlerTTSForConditionalGeneration.from_pretrained(
-        "ai4bharat/indic-parler-tts"
-    ).to(device)
+    # Check if Flash Attention 2 is available for the decoder
+    _fa2_available = False
+    try:
+        from flash_attn import flash_attn_func  # noqa: F401
+        _fa2_available = True
+    except ImportError:
+        pass
+
+    if _fa2_available and device == "cuda":
+        # Load config, enable FA2 on decoder only (T5 encoder doesn't support it)
+        config = AutoConfig.from_pretrained("ai4bharat/indic-parler-tts", trust_remote_code=True)
+        config.decoder._attn_implementation = "flash_attention_2"
+        model = ParlerTTSForConditionalGeneration.from_pretrained(
+            "ai4bharat/indic-parler-tts",
+            config=config,
+            torch_dtype=torch.float16,
+        ).to(device)
+        log.info("Flash Attention 2 enabled on decoder (24 layers)")
+    else:
+        model = ParlerTTSForConditionalGeneration.from_pretrained(
+            "ai4bharat/indic-parler-tts",
+            torch_dtype=torch.float16,
+        ).to(device)
+        log.info(f"Using default attention (SDPA) — flash-attn {'not installed' if not _fa2_available else 'N/A for ' + device}")
+
     model.eval()
 
     # MPS workaround: DAC audio decoder uses conv1d with >65536 output channels
@@ -305,6 +328,13 @@ def load_model():
         model.config.text_encoder._name_or_path
     )
 
+    # Pre-tokenize all voice preset descriptions to avoid re-tokenizing per request
+    for lang_code, styles in VOICE_PRESETS.items():
+        for style_name, desc_text in styles.items():
+            key = f"{lang_code}|{style_name}"
+            _desc_token_cache[key] = desc_tokenizer(desc_text, return_tensors="pt").to(device)
+    log.info(f"Pre-cached {len(_desc_token_cache)} voice description tokens")
+
     elapsed = time.time() - start
     log.info(f"Model loaded in {elapsed:.1f}s | device={device} | sample_rate={model.config.sampling_rate}Hz")
 
@@ -317,21 +347,33 @@ def get_voice_description(lang_code, style="default"):
 
 def _synthesize_sync(text, lang_code, style="default", custom_description=None):
     """Run inference. Returns (WAV bytes, sample_rate)."""
+    t_start = time.perf_counter()
+
     description = custom_description or get_voice_description(lang_code, style)
 
-    desc_inputs   = desc_tokenizer(description, return_tensors="pt").to(device)
+    # Use pre-cached tokens for preset descriptions, live-tokenize only for custom
+    cache_key = f"{lang_code}|{style}"
+    if not custom_description and cache_key in _desc_token_cache:
+        desc_inputs = _desc_token_cache[cache_key]
+    else:
+        desc_inputs = desc_tokenizer(description, return_tensors="pt").to(device)
+
     prompt_inputs = tokenizer(text, return_tensors="pt").to(device)
+    t_tokenize = time.perf_counter()
 
     with _infer_lock:
-        with torch.no_grad():
+        with torch.inference_mode():
             generation = model.generate(
                 input_ids=desc_inputs.input_ids,
                 attention_mask=desc_inputs.attention_mask,
                 prompt_input_ids=prompt_inputs.input_ids,
                 prompt_attention_mask=prompt_inputs.attention_mask,
             )
+    t_infer = time.perf_counter()
 
-    audio_arr = generation.cpu().numpy().squeeze().astype(np.float32)
+    # Post-processing (CPU-bound, outside inference lock for better concurrency)
+    audio_arr = generation.cpu().float().numpy().squeeze()
+    t_transfer = time.perf_counter()
 
     # Normalize
     peak = np.abs(audio_arr).max()
@@ -350,11 +392,25 @@ def _synthesize_sync(text, lang_code, style="default", custom_description=None):
             audio_arr,
         ).astype(np.float32)
         sample_rate = OUTPUT_SAMPLE_RATE
+    t_resample = time.perf_counter()
 
     buf = io.BytesIO()
     sf.write(buf, audio_arr, sample_rate, format="WAV", subtype="PCM_16")
     buf.seek(0)
-    return buf.read(), sample_rate
+    wav_bytes = buf.read()
+    t_encode = time.perf_counter()
+
+    log.info(
+        f"[perf] tokenize={1000*(t_tokenize-t_start):.1f}ms | "
+        f"inference={1000*(t_infer-t_tokenize):.1f}ms | "
+        f"gpu→cpu={1000*(t_transfer-t_infer):.1f}ms | "
+        f"resample={1000*(t_resample-t_transfer):.1f}ms | "
+        f"wav_encode={1000*(t_encode-t_resample):.1f}ms | "
+        f"total={1000*(t_encode-t_start):.1f}ms | "
+        f"text={len(text)}chars"
+    )
+
+    return wav_bytes, sample_rate
 
 
 async def synthesize(text, lang_code, style="default", custom_description=None):
@@ -371,6 +427,7 @@ def make_cache_key(text, lang_code, style):
 
 async def _batch_worker():
     """Background coroutine — pulls jobs from queue and runs synthesis."""
+    global cache_hits, cache_total
     log.info("Batch worker started")
     while True:
         try:
@@ -391,16 +448,35 @@ async def _batch_worker():
             log.info(f"[batch] Processing job {job_id} ({job.language}/{job.style}, {len(job.text)} chars)")
 
             start = time.time()
-            wav_bytes, sample_rate = await synthesize(job.text, job.language, job.style, job.description)
-            latency = int((time.time() - start) * 1000)
 
-            job.audio_b64 = base64.b64encode(wav_bytes).decode()
-            job.sample_rate = sample_rate
-            job.latency_ms = latency
-            job.status = JobStatus.COMPLETED
-            job.completed_at = time.time()
+            # Check LRU cache first (same as WebSocket path)
+            ck = make_cache_key(job.text, job.language, job.style)
+            cached = audio_cache.get(ck)
 
-            log.info(f"[batch] Job {job_id} completed ({latency}ms)")
+            if cached:
+                cache_hits += 1
+                job.audio_b64 = cached["b64"]
+                job.sample_rate = cached["sr"]
+                job.latency_ms = 1
+                job.status = JobStatus.COMPLETED
+                job.completed_at = time.time()
+                log.info(f"[batch] Job {job_id} CACHE HIT (1ms)")
+            else:
+                wav_bytes, sample_rate = await synthesize(job.text, job.language, job.style, job.description)
+                latency = int((time.time() - start) * 1000)
+
+                b64audio = base64.b64encode(wav_bytes).decode()
+                audio_cache.put(ck, {"b64": b64audio, "sr": sample_rate})
+
+                job.audio_b64 = b64audio
+                job.sample_rate = sample_rate
+                job.latency_ms = latency
+                job.status = JobStatus.COMPLETED
+                job.completed_at = time.time()
+
+                log.info(f"[batch] Job {job_id} completed ({latency}ms)")
+
+            cache_total += 1
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -915,6 +991,7 @@ async def main():
 
     log.info("Running warm-up inference...")
     _synthesize_sync("Hello", "en-IN", "default")
+    _synthesize_sync("This is a longer warm-up sentence for CUDA kernel warmup.", "en-IN", "default")
     log.info("Warm-up complete")
 
     _conn_semaphore = asyncio.Semaphore(MAX_CONNECTIONS)
