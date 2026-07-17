@@ -22,8 +22,13 @@ RUN pip install --no-cache-dir \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download the model at build time (baked into image, ~4-6GB)
-# indic-parler-tts is NOT gated — no HF token needed
+# Download the model at build time (baked into image, ~4-6GB).
+# ai4bharat/indic-parler-tts IS a gated repo on Hugging Face (despite the comment
+# that used to be here) — needs an authenticated, approved token or the download
+# 401s. ARG+ENV so huggingface_hub's automatic HF_TOKEN env-var detection picks it
+# up with no code changes needed in the from_pretrained calls below.
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 RUN python -c "\
 from parler_tts import ParlerTTSForConditionalGeneration; \
 from transformers import AutoTokenizer; \
