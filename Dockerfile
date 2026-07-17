@@ -7,9 +7,15 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Install PyTorch CPU-only (before other deps to cache this large layer)
+# Install PyTorch CPU-only (before other deps to cache this large layer).
+# torchaudio MUST be pinned here too, from the same CPU-only index — otherwise
+# `pip install -r requirements.txt` below pulls it in later as a transitive
+# dependency of parler-tts -> audiotools -> dac from the default PyPI index,
+# which gives a torchaudio build whose native extension doesn't match this
+# torch build and fails to load at import time:
+#   OSError: Could not load this library: .../torchaudio/lib/_torchaudio.abi3.so
 RUN pip install --no-cache-dir \
-    torch \
+    torch torchaudio \
     --index-url https://download.pytorch.org/whl/cpu
 
 # Install remaining Python dependencies
