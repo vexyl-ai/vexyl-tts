@@ -25,11 +25,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download the model at build time (baked into image, ~4-6GB).
 # ai4bharat/indic-parler-tts IS a gated repo on Hugging Face (despite the comment
 # that used to be here) — needs an authenticated, approved token or the download
-# 401s. ARG+ENV so huggingface_hub's automatic HF_TOKEN env-var detection picks it
-# up with no code changes needed in the from_pretrained calls below.
+# 401s. The token is only needed for THIS build step, so scope it to the RUN via
+# an inline env var. Do NOT use `ENV HF_TOKEN=...`: that persists the secret into
+# the final image config, leaking it to anyone who runs `docker inspect`/`docker
+# history` or pulls the image — and the token has no runtime purpose (model is
+# already baked in). ARG is not referenced elsewhere, so it stays out of the
+# final image env. huggingface_hub picks up HF_TOKEN automatically, so no code
+# changes are needed in the from_pretrained calls below.
 ARG HF_TOKEN
-ENV HF_TOKEN=${HF_TOKEN}
-RUN python -c "\
+RUN HF_TOKEN=${HF_TOKEN} python -c "\
 from parler_tts import ParlerTTSForConditionalGeneration; \
 from transformers import AutoTokenizer; \
 model = ParlerTTSForConditionalGeneration.from_pretrained('ai4bharat/indic-parler-tts'); \
