@@ -1,0 +1,54 @@
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+
+# System deps: libgomp1 for PyTorch OpenMP, libsndfile1 for soundfile
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv libgomp1 libsndfile1 git && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install PyTorch with CUDA support (before other deps to cache this large layer).
+# torchaudio MUST be pinned here too, from the same CUDA index — otherwise
+# `pip install -r requirements.txt` below pulls it in later as a transitive
+# dependency of parler-tts -> audiotools -> dac from the default PyPI index,
+# which gives a torchaudio build whose native extension doesn't match this
+# CUDA torch build and fails to load at import time:
+#   OSError: Could not load this library: .../torchaudio/lib/_torchaudio.abi3.so
+RUN pip install --no-cache-dir \
+    torch torchaudio \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# Install remaining Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Download the model at build time (baked into image, ~4-6GB).
+# ai4bharat/indic-parler-tts IS a gated repo on Hugging Face — needs an
+# authenticated, approved token or the download 401s. Scope the token to THIS
+# build step via an inline env var; do NOT use `ENV HF_TOKEN=...`, which would
+# persist the secret into the final image config (leaks via `docker inspect` /
+# `docker history` and to anyone who pulls the image) for no runtime benefit —
+# the model is already baked in. huggingface_hub auto-detects HF_TOKEN, so no
+# code changes are needed in the from_pretrained calls below.
+ARG HF_TOKEN
+RUN HF_TOKEN=${HF_TOKEN} python3 -c "\
+from parler_tts import ParlerTTSForConditionalGeneration; \
+from transformers import AutoTokenizer; \
+model = ParlerTTSForConditionalGeneration.from_pretrained('ai4bharat/indic-parler-tts'); \
+AutoTokenizer.from_pretrained('ai4bharat/indic-parler-tts'); \
+AutoTokenizer.from_pretrained(model.config.text_encoder._name_or_path)"
+
+# Copy application code
+COPY vexyl_tts_server.py .
+
+# Set defaults — device=auto will detect CUDA at runtime
+ENV PORT=8080 \
+    VEXYL_TTS_HOST=0.0.0.0 \
+    VEXYL_TTS_DEVICE=auto
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT}/health')"
+
+CMD ["python3", "-u", "vexyl_tts_server.py"]
