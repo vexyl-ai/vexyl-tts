@@ -13,8 +13,14 @@
 
 ### GPU Dockerfile
 - Added `Dockerfile.gpu` based on `nvidia/cuda:12.8.0-runtime-ubuntu22.04`
-- Installs PyTorch with CUDA 12.8 support, sets `VEXYL_TTS_DEVICE=auto`
+- Installs `torch` + `torchaudio` together from the CUDA 12.8 wheel index (pinned to the same index to avoid a torchaudio ABI mismatch), sets `VEXYL_TTS_DEVICE=auto`
+- Accepts an `HF_TOKEN` build arg for the gated `ai4bharat/indic-parler-tts` download, scoped to the build step so the secret is not baked into the final image
 - Run with: `docker run --gpus all -p 8080:8080 vexyl-tts-gpu`
+
+### Docker Build Fixes (CPU image)
+- Pinned `torchaudio` alongside `torch` on the CPU-only wheel index — previously it arrived unpinned as a transitive dependency, causing an `_torchaudio.abi3.so` load failure at import time
+- Corrected the stale "not gated" comment: `ai4bharat/indic-parler-tts` is a gated repo; the build now accepts an `HF_TOKEN` build arg to authenticate the download
+- `HF_TOKEN` is scoped to the download `RUN` (no persistent `ENV`) so the token is not leaked into the final image via `docker inspect` / `docker history`
 
 ### Inference Performance
 - **FP16 inference** — model loads with `torch_dtype=torch.float16` (previously FP32)
