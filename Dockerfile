@@ -7,17 +7,28 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Install PyTorch CPU-only (before other deps to cache this large layer)
+# Install PyTorch CPU-only (before other deps to cache this large layer).
+# torchaudio MUST be pinned here too, from the same CPU-only index — otherwise
+# `pip install -r requirements.txt` below pulls it in later as a transitive
+# dependency of parler-tts -> audiotools -> dac from the default PyPI index,
+# which gives a torchaudio build whose native extension doesn't match this
+# torch build and fails to load at import time:
+#   OSError: Could not load this library: .../torchaudio/lib/_torchaudio.abi3.so
 RUN pip install --no-cache-dir \
-    torch \
+    torch torchaudio \
     --index-url https://download.pytorch.org/whl/cpu
 
 # Install remaining Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download the model at build time (baked into image, ~4-6GB)
-# indic-parler-tts is NOT gated — no HF token needed
+# Download the model at build time (baked into image, ~4-6GB).
+# ai4bharat/indic-parler-tts IS a gated repo on Hugging Face (despite the comment
+# that used to be here) — needs an authenticated, approved token or the download
+# 401s. ARG+ENV so huggingface_hub's automatic HF_TOKEN env-var detection picks it
+# up with no code changes needed in the from_pretrained calls below.
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 RUN python -c "\
 from parler_tts import ParlerTTSForConditionalGeneration; \
 from transformers import AutoTokenizer; \
