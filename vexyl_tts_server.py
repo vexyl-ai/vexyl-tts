@@ -30,6 +30,7 @@ import hashlib
 import numpy as np
 import torch
 import soundfile as sf
+import soxr
 import os
 import io
 import logging
@@ -55,6 +56,8 @@ HOST            = os.getenv("VEXYL_TTS_HOST",   "0.0.0.0")
 PORT            = int(os.getenv("PORT", os.getenv("VEXYL_TTS_PORT", "8080")))
 DEVICE_PREF     = os.getenv("VEXYL_TTS_DEVICE", "auto")
 CACHE_SIZE      = int(os.getenv("VEXYL_TTS_CACHE_SIZE", "200"))
+DISK_CACHE_DIR  = os.getenv("VEXYL_TTS_DISK_CACHE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio_cache"))
+DISK_CACHE      = os.getenv("VEXYL_TTS_DISK_CACHE", "1") == "1"
 API_KEY         = os.getenv("VEXYL_TTS_API_KEY", "")
 MAX_CONNECTIONS = int(os.getenv("VEXYL_TTS_MAX_CONN", "50"))
 OUTPUT_SAMPLE_RATE = int(os.getenv("VEXYL_TTS_SAMPLE_RATE", "0"))  # 0 = native (44100), set 8000 for Asterisk
@@ -231,7 +234,54 @@ class LRUCache:
     def __len__(self):
         return len(self.cache)
 
-audio_cache = LRUCache(CACHE_SIZE)
+class AudioCache:
+    """Two-tier cache: in-memory LRU backed by an on-disk WAV store.
+
+    Disk entries survive restarts and are not bounded by CACHE_SIZE —
+    IVR prompts repeat heavily, so a disk hit (~1ms) beats re-synthesis (~1.5s).
+    """
+    def __init__(self, capacity, disk_dir=None):
+        self.lru = LRUCache(capacity)
+        self.disk_dir = disk_dir
+        if disk_dir:
+            os.makedirs(disk_dir, exist_ok=True)
+
+    def _disk_path(self, key):
+        return os.path.join(self.disk_dir, f"{key}.wav")
+
+    def get(self, key):
+        value = self.lru.get(key)
+        if value is not None:
+            return value
+        if not self.disk_dir:
+            return None
+        path = self._disk_path(key)
+        try:
+            with open(path, "rb") as f:
+                wav_bytes = f.read()
+            sr = sf.info(io.BytesIO(wav_bytes)).samplerate
+        except Exception:
+            return None
+        value = {"b64": base64.b64encode(wav_bytes).decode(), "sr": sr}
+        self.lru.put(key, value)
+        return value
+
+    def put(self, key, value):
+        self.lru.put(key, value)
+        if not self.disk_dir:
+            return
+        try:
+            tmp_path = self._disk_path(key) + ".tmp"
+            with open(tmp_path, "wb") as f:
+                f.write(base64.b64decode(value["b64"]))
+            os.replace(tmp_path, self._disk_path(key))
+        except Exception as e:
+            log.warning(f"Disk cache write failed for {key}: {e}")
+
+    def __len__(self):
+        return len(self.lru)
+
+audio_cache = AudioCache(CACHE_SIZE, DISK_CACHE_DIR if DISK_CACHE else None)
 cache_hits  = 0
 cache_total = 0
 
@@ -269,7 +319,13 @@ def load_model():
 
     if DEVICE_PREF == "auto":
         if torch.cuda.is_available():
-            device = "cuda"
+            try:
+                torch.cuda.init()
+                device = "cuda"
+            except RuntimeError as e:
+                log.warning(f"CUDA reported available but init failed: {e}")
+                log.warning("Falling back to CPU")
+                device = "cpu"
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             device = "mps"
         else:
@@ -383,14 +439,12 @@ def _synthesize_sync(text, lang_code, style="default", custom_description=None):
     native_rate = model.config.sampling_rate
     sample_rate = native_rate
 
-    # Downsample if output sample rate is configured (e.g. 8000 for Asterisk)
+    # Downsample if output sample rate is configured (e.g. 8000 for Asterisk).
+    # soxr applies a proper anti-aliasing filter; linear interp aliases badly at 8kHz.
     if OUTPUT_SAMPLE_RATE and OUTPUT_SAMPLE_RATE != native_rate:
-        num_samples = int(len(audio_arr) * OUTPUT_SAMPLE_RATE / native_rate)
-        audio_arr = np.interp(
-            np.linspace(0, len(audio_arr) - 1, num_samples),
-            np.arange(len(audio_arr)),
-            audio_arr,
-        ).astype(np.float32)
+        audio_arr = soxr.resample(
+            audio_arr.astype(np.float32), native_rate, OUTPUT_SAMPLE_RATE, quality="HQ"
+        )
         sample_rate = OUTPUT_SAMPLE_RATE
     t_resample = time.perf_counter()
 
@@ -418,8 +472,8 @@ async def synthesize(text, lang_code, style="default", custom_description=None):
     return await asyncio.to_thread(_synthesize_sync, text, lang_code, style, custom_description)
 
 
-def make_cache_key(text, lang_code, style):
-    raw = f"{text}|{lang_code}|{style}|indic-parler-tts"
+def make_cache_key(text, lang_code, style, description=None):
+    raw = f"{text}|{lang_code}|{style}|{description or ''}|indic-parler-tts"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -450,7 +504,7 @@ async def _batch_worker():
             start = time.time()
 
             # Check LRU cache first (same as WebSocket path)
-            ck = make_cache_key(job.text, job.language, job.style)
+            ck = make_cache_key(job.text, job.language, job.style, job.description)
             cached = audio_cache.get(ck)
 
             if cached:
@@ -557,7 +611,7 @@ async def handle_connection(websocket):
                     continue
 
                 cache_total += 1
-                ck = make_cache_key(text, lang_code, style)
+                ck = make_cache_key(text, lang_code, style, custom_desc)
                 cached = audio_cache.get(ck)
 
                 if cached:
